@@ -1,7 +1,5 @@
 #!/bin/bash
-#
 # diy-mtk.sh -- Community packages & config for chasey-dev build
-#
 
 merge_package(){
     repo=`echo $1 | rev | cut -d'/' -f 1 | rev`
@@ -45,7 +43,7 @@ apply_workspace_patch() {
     git apply --recount --ignore-space-change --ignore-whitespace "$patch_file"
 }
 
-# Remove upstream feeds replaced by community clones below
+# Remove feed packages replaced by community clones
 rm -rf feeds/luci/themes/luci-theme-argon
 rm -rf feeds/luci/applications/luci-app-argon-config
 rm -rf feeds/luci/applications/luci-app-passwall
@@ -66,10 +64,8 @@ git clone --depth=1 https://github.com/1522042029/luci-app-socat
 git clone --depth=1 https://github.com/jerrykuku/luci-theme-argon
 git clone --depth=1 https://github.com/jerrykuku/luci-app-argon-config
 merge_package https://github.com/kenzok8/jell jell/adguardhome
-# Fix broken default_username.patch: upstream zh-cn.json was reorganized since
-# the patch was created (hunk context moved from ~L571 to ~L755, indentation
-# changed from 4-space to 2-space). Replace with corrected hunk so the build
-# does not fail at AdGuardHome prepare stage.
+# default_username.patch: upstream zh-cn.json moved/indent changed; rewrite the
+# hunk so the AdGuardHome prepare stage does not fail
 _adguardhome_patch="package/openwrt-packages/adguardhome/patches/default_username.patch"
 if [ -f "$_adguardhome_patch" ]; then
 	cat > "$_adguardhome_patch" << 'AGPATCH'
@@ -96,29 +92,22 @@ merge_package "-b main https://github.com/linkease/ddnsto-openwrt-package" ddnst
 merge_package "-b main https://github.com/linkease/ddnsto-openwrt-package" ddnsto-openwrt-package/luci-app-ddnsto
 popd
 
-# luci-app-mosdns
 rm -rf feeds/packages/lang/golang
-git clone --depth=1 https://github.com/sbwml/packages_lang_golang -b 26.x feeds/packages/lang/golang
+git clone --depth=1 https://github.com/sbwml/packages_lang_golang -b 27.x feeds/packages/lang/golang
 rm -rf feeds/packages/net/mosdns
 git clone --depth=1 https://github.com/sbwml/luci-app-mosdns -b v5 package/mosdns
 
-# luci-app-OpenClash
 mkdir -p package/OpenClash
 pushd package/OpenClash
 git clone --depth=1 https://github.com/vernesong/OpenClash
 popd
 
-# Fix non-deterministic PKG_MIRROR_HASH in helloworld/shadowsocks-libev
-patch_makefile_dep \
-    package/community/helloworld/shadowsocks-libev/Makefile \
-    'PKG_MIRROR_HASH:=b3898ad0a557bc8b0bbb2f3888101d461944239b0b7d4d4c6f164d73694a4595' \
-    'PKG_MIRROR_HASH:=skip'
-
-# simple-obfs: skip tarball hash (git archive + submodule produces non-deterministic hash)
-patch_makefile_dep \
+# helloworld simple-obfs/shadowsocks-libev: skip the non-deterministic PKG_MIRROR_HASH
+for f in \
     package/community/helloworld/simple-obfs/Makefile \
-    'PKG_MIRROR_HASH:=7a0154d2de18373e52783d1b64cf5204471049c2d2c64f0b3323d7f430aa4275' \
-    'PKG_MIRROR_HASH:=skip'
+    package/community/helloworld/shadowsocks-libev/Makefile; do
+    [ -f "$f" ] && sed -i '/^PKG_MIRROR_HASH:=/s/:=.*/:=skip/' "$f"
+done
 
 # adguardhome: skip frontend hash (GitHub release asset hash is volatile)
 patch_makefile_dep \
@@ -126,15 +115,15 @@ patch_makefile_dep \
     'FRONTEND_HASH:=084bf3e00ca3e49487fc5a87270b4e1eb26617710ca6116b9e42ce90cb1ad358' \
     'FRONTEND_HASH:=skip'
 
-# shadowsocksr-libev: replace brittle LTO with no-lto
-[ -f package/community/openwrt-passwall-packages/shadowsocksr-libev/Makefile ] && {
-    sed -i '/^[[:space:]]*TARGET_CFLAGS += -flto$/c\PKG_BUILD_FLAGS+=no-lto' \
-        package/community/openwrt-passwall-packages/shadowsocksr-libev/Makefile
-    patch_makefile_dep \
-        package/community/openwrt-passwall-packages/shadowsocksr-libev/Makefile \
-        '146fa4511a52da2aaa1e11ea0294cfb450e62643156c5da3b10e037ef43961f6' \
-        'skip'
-}
+# containerd's vendored cpuid v2.0.4 hits Go's >= 1.23 linkname check. MAKE_FLAGS is
+# frozen by the BuildPackage eval, so the line must be injected before it.
+f=feeds/packages/utils/containerd/Makefile
+if [ ! -f "$f" ]; then
+    echo "[DIY] containerd Makefile missing: $f" >&2
+elif ! grep -q 'checklinkname=0' "$f"; then
+    awk -v ins="MAKE_FLAGS += EXTRA_LDFLAGS='-s -w -checklinkname=0'" '{print} /^Build\/Compile=/ {print ins}' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+    echo "[DIY] containerd: -checklinkname=0 injected=$(grep -c 'checklinkname=0' "$f")"
+fi
 
 # GCC 14 + musl fortify workaround for mbedtls
 if ! grep -q '_FORTIFY_SOURCE=0' package/libs/mbedtls/Makefile; then
@@ -156,42 +145,34 @@ if grep -q 'mkdir $(PKG_BUILD_DIR)/bin' feeds/packages/net/vpnc/Makefile 2>/dev/
     sed -i '/mkdir $(PKG_BUILD_DIR)\/bin/s/mkdir /mkdir -p /' feeds/packages/net/vpnc/Makefile
 fi
 
-# hostapd: keep MTK private MLO PMKSA patch out of non-BE builds
-patch_makefile_dep \
-    package/network/services/hostapd/patches/975-mtk-mlo-pass-pmksa-link-address.patch \
-    '@@ -1158,6 +1158,18 @@ static int sae_assign_vlan(struct hostap' \
-    '@@ -1158,6 +1158,21 @@ static int sae_assign_vlan(struct hostap' \
-    && echo "[DIY] hostapd 975 hunk header: 18 -> 21" \
-    || echo "[DIY] hostapd 975 hunk header: SKIP (already patched or not found)"
-patch_makefile_dep \
-    package/network/services/hostapd/patches/975-mtk-mlo-pass-pmksa-link-address.patch \
-    '+	bool is_ml = ap_sta_has_ml_rsn(hapd, sta);
-+
-+	if (is_ml) {
-+		u8 link_id = sta->mld_assoc_link_id;
-+
-+		/* PMKSA is keyed by MLD address; driver sync also needs link addr. */
-+		pmksa_addr = sta->mld_info.common_info.mld_addr;
-+		pmksa_link_addr = sta->mld_info.links[link_id].peer_addr;
-+	}' \
-    '+	bool is_ml = false;
-+
-+#ifdef CONFIG_IEEE80211BE
-+	is_ml = ap_sta_has_ml_rsn(hapd, sta);
-+	if (is_ml) {
-+		u8 link_id = sta->mld_assoc_link_id;
-+
-+		/* PMKSA is keyed by MLD address; driver sync also needs link addr. */
-+		pmksa_addr = sta->mld_info.common_info.mld_addr;
-+		pmksa_link_addr = sta->mld_info.links[link_id].peer_addr;
-+	}
-+#endif /* CONFIG_IEEE80211BE */' \
-    && echo "[DIY] hostapd 975 guard: #ifdef CONFIG_IEEE80211BE injected" \
-    || echo "[DIY] hostapd 975 guard: SKIP (already patched or not found)"
+# hostapd 975 (MTK MLO PMKSA): sta->mld_* only exist under CONFIG_IEEE80211BE and
+# this tree builds wpad without 11BE, so the MLO block must be compiled out.
+# Regex guards survive upstream churn; bump the hunk line count by +3.
+_mt975="package/network/services/hostapd/patches/975-mtk-mlo-pass-pmksa-link-address.patch"
+if [ -f "$_mt975" ]; then
+    if perl -0777 -e '
+        local $/;
+        my $txt = <STDIN>;
+        my $n = 0;
+        $n++ if $txt =~ s/^(\+\t)bool is_ml = ap_sta_has_ml_rsn\(hapd, sta\);\n/${1}bool is_ml = false;\n+#ifdef CONFIG_IEEE80211BE\n${1}is_ml = ap_sta_has_ml_rsn(hapd, sta);\n/m;
+        $n++ if $txt =~ s/^(\+\tif \(is_ml\) \{.*?^(\+\t)\}\n)/$1+#endif \/* CONFIG_IEEE80211BE *\/\n/ms;
+        if ($n == 2) {
+            $txt =~ s/^(\@\@ [^\n]*\+[0-9]+,)(\d+)( \@\@(?=[^\n]*\n \n void sae_accept_sta))/sprintf("%s%d%s", $1, $2 + 3, $3)/me;
+            print $txt;
+            exit 0;
+        }
+        exit 2;
+    ' < "$_mt975" > "$_mt975.new"; then
+        mv "$_mt975.new" "$_mt975"
+        echo "[DIY] hostapd 975 guard: #ifdef CONFIG_IEEE80211BE injected (regex, hunk count +3)"
+    else
+        rm -f "$_mt975.new"
+        echo "[DIY] hostapd 975 guard: SKIP - 975 patch format changed, MLO block left unguarded" >&2
+    fi
+fi
 
-# MTK Wi-Fi profiles: replace chasey-dev version with padavanonly's mt7990-only build
-# (chasey-dev version references nonexistent mt7622/mt7615 files and uses broken
-#  shell command-substitution for Kconfig values)
+# wifi-profile: use padavanonly's mt7990-only build (chasey-dev's references
+# nonexistent files and breaks on shell command-substitution)
 rm -rf package/mtk/drivers/wifi-profile
 git clone --depth=1 -b mt798x-mt799x-6.6-mtwifi \
     https://github.com/padavanonly/immortalwrt-mt798x-6.6.git \
@@ -212,6 +193,97 @@ if [ -f "package/mtk/drivers/mt_wifi7/Makefile" ] && \
     echo "[DIY] mt_wifi7/Makefile: CONFIG_*_card_name fixed for make expansion"
 fi
 
+# MTK mt_wifi7: map OpenWrt Kconfig names to vendor Kbuild names
+_mt_wifi7_makefile="package/mtk/drivers/mt_wifi7/Makefile"
+_mt_wifi7_kconfig_anchor='$(foreach c, $(PKG_KCONFIG),$(if $(CONFIG_MTK_WIFI7_$c),CONFIG_$(c)=$(CONFIG_MTK_WIFI7_$(c)))) \'
+_mt_wifi7_kconfig_replacement='$(foreach c, $(PKG_KCONFIG),$(if $(CONFIG_MTK_WIFI7_$c),CONFIG_$(c)=$(CONFIG_MTK_WIFI7_$(c)))) \
+		CONFIG_WIFI_DRIVER=$(CONFIG_MTK_WIFI7_DRIVER) \
+		CONFIG_DOT11_HE_AX=$(CONFIG_MTK_WIFI7_DOT11_AX_SUPPORT) \
+		CONFIG_DOT11_EHT_BE=$(CONFIG_MTK_WIFI7_DOT11_BE_SUPPORT) \'
+
+if [ ! -f "$_mt_wifi7_makefile" ]; then
+    echo "Required mt_wifi7 Makefile not found: $_mt_wifi7_makefile" >&2
+    exit 1
+elif grep -qE '^[[:space:]]*CONFIG_WIFI_DRIVER=\$\(CONFIG_MTK_WIFI7_DRIVER\)[[:space:]]*\\$' "$_mt_wifi7_makefile" && \
+     grep -qE '^[[:space:]]*CONFIG_DOT11_HE_AX=\$\(CONFIG_MTK_WIFI7_DOT11_AX_SUPPORT\)[[:space:]]*\\$' "$_mt_wifi7_makefile" && \
+     grep -qE '^[[:space:]]*CONFIG_DOT11_EHT_BE=\$\(CONFIG_MTK_WIFI7_DOT11_BE_SUPPORT\)[[:space:]]*\\$' "$_mt_wifi7_makefile"; then
+    echo "[DIY] mt_wifi7/Makefile: vendor Kbuild mappings already present"
+elif grep -qF "$_mt_wifi7_kconfig_anchor" "$_mt_wifi7_makefile"; then
+    patch_makefile_dep \
+        "$_mt_wifi7_makefile" \
+        "$_mt_wifi7_kconfig_anchor" \
+        "$_mt_wifi7_kconfig_replacement" || exit 1
+    echo "[DIY] mt_wifi7/Makefile: vendor Kbuild mappings injected"
+else
+    echo "Failed to locate mt_wifi7 Kconfig compile anchor in $_mt_wifi7_makefile" >&2
+    exit 1
+fi
+
+# MTK mt_wifi7: Linux 6.12 moved the generic unaligned helpers out of asm/.
+_mt_wifi7_unaligned_patch_src="$GITHUB_WORKSPACE/patches/filogic/25.12/1006-mt_wifi7-linux-6.12-unaligned-header.patch"
+_mt_wifi7_unaligned_patch_dst="package/mtk/drivers/mt_wifi7/patches/900-linux-6.12-unaligned-header.patch"
+
+if [ ! -f "$_mt_wifi7_unaligned_patch_src" ]; then
+    echo "Required mt_wifi7 compatibility patch not found: $_mt_wifi7_unaligned_patch_src" >&2
+    exit 1
+fi
+
+install -Dm0644 "$_mt_wifi7_unaligned_patch_src" "$_mt_wifi7_unaligned_patch_dst"
+echo "[DIY] mt_wifi7: Linux 6.12 unaligned header compatibility patch installed"
+
+# mt_wifi7: GCC 14 -Werror rejects missing AC_NUM/PMKSA declarations (kept
+# separate from the unaligned fix so either patch can be dropped)
+_mt_wifi7_declarations_patch_src="$GITHUB_WORKSPACE/patches/filogic/25.12/1007-mt_wifi7-fix-missing-declarations.patch"
+_mt_wifi7_declarations_patch_dst="package/mtk/drivers/mt_wifi7/patches/901-fix-missing-declarations.patch"
+
+if [ ! -f "$_mt_wifi7_declarations_patch_src" ]; then
+    echo "Required mt_wifi7 compatibility patch not found: $_mt_wifi7_declarations_patch_src" >&2
+    exit 1
+fi
+
+install -Dm0644 "$_mt_wifi7_declarations_patch_src" "$_mt_wifi7_declarations_patch_dst"
+echo "[DIY] mt_wifi7: GCC 14 missing declarations compatibility patch installed"
+
+# mt_wifi7: GCC 14 -Werror rejects MAX_TRANSMIT_POWER in rt_channel.c (vendor
+# only defines it locally in bcn.c)
+_mt_wifi7_max_tx_power_patch_src="$GITHUB_WORKSPACE/patches/filogic/25.12/1008-mt_wifi7-fix-max-transmit-power.patch"
+_mt_wifi7_max_tx_power_patch_dst="package/mtk/drivers/mt_wifi7/patches/902-fix-max-transmit-power.patch"
+
+if [ ! -f "$_mt_wifi7_max_tx_power_patch_src" ]; then
+    echo "Required mt_wifi7 compatibility patch not found: $_mt_wifi7_max_tx_power_patch_src" >&2
+    exit 1
+fi
+
+install -Dm0644 "$_mt_wifi7_max_tx_power_patch_src" "$_mt_wifi7_max_tx_power_patch_dst"
+echo "[DIY] mt_wifi7: MAX_TRANSMIT_POWER declaration compatibility patch installed"
+
+# mt_wifi7: RT_CFG80211_SUPPORT makes owe_cmm.h skip sae_cmm.h while sec_cmm.h
+# still compiles the SAE structs -> "field has incomplete type". Align the
+# include guard with the field guard.
+_mt_wifi7_sae_patch_src="$GITHUB_WORKSPACE/patches/filogic/25.12/1009-mt_wifi7-fix-incomplete-sae-structs.patch"
+_mt_wifi7_sae_patch_dst="package/mtk/drivers/mt_wifi7/patches/903-fix-incomplete-sae-structs.patch"
+
+if [ ! -f "$_mt_wifi7_sae_patch_src" ]; then
+    echo "Required mt_wifi7 compatibility patch not found: $_mt_wifi7_sae_patch_src" >&2
+    exit 1
+fi
+
+install -Dm0644 "$_mt_wifi7_sae_patch_src" "$_mt_wifi7_sae_patch_dst"
+echo "[DIY] mt_wifi7: incomplete SAE struct compatibility patch installed"
+
+# mt_wifi7: cac_required is MAP-guarded but used unconditionally by rt_channel.c
+# and cmm_rdm_mt.c -> move the field out of the MAP guard
+_mt_wifi7_cac_patch_src="$GITHUB_WORKSPACE/patches/filogic/25.12/1010-mt_wifi7-fix-cac-required-field.patch"
+_mt_wifi7_cac_patch_dst="package/mtk/drivers/mt_wifi7/patches/904-fix-cac-required-field.patch"
+
+if [ ! -f "$_mt_wifi7_cac_patch_src" ]; then
+    echo "Required mt_wifi7 compatibility patch not found: $_mt_wifi7_cac_patch_src" >&2
+    exit 1
+fi
+
+install -Dm0644 "$_mt_wifi7_cac_patch_src" "$_mt_wifi7_cac_patch_dst"
+echo "[DIY] mt_wifi7: cac_required field compatibility patch installed"
+
 # datconf: disable parallel build (5 sub-packages share one CMake tree, race with -j>1)
 if [ -f "package/mtk/applications/datconf/Makefile" ] && \
    ! grep -q 'PKG_BUILD_PARALLEL' "package/mtk/applications/datconf/Makefile"; then
@@ -223,8 +295,6 @@ fi
 ./scripts/feeds update -a
 ./scripts/feeds install -a
 ./scripts/feeds install c-ares udns
-
-
 
 # Remove kiddin9 APK repo (triggers broken video/ sub-repo)
 for f in \
@@ -251,6 +321,37 @@ export GOEXPERIMENT=
 export GOPROXY=https://proxy.golang.org,direct
 
 # Compatibility fixes for floating feeds metadata
+# rust: rust-lang pruned the 1.94.0 CI LLVM artifacts, so download-ci-llvm=true
+# 404s; build LLVM from source instead (configure.py: last --set wins).
+_rust_makefile="feeds/packages/lang/rust/Makefile"
+if [ -f "$_rust_makefile" ]; then
+    if grep -qF -- '--set=llvm.download-ci-llvm=false' "$_rust_makefile"; then
+        echo "[DIY] rust: llvm.download-ci-llvm already false"
+    elif grep -qF -- '--set=llvm.download-ci-llvm=true' "$_rust_makefile"; then
+        sed -i 's/--set=llvm\.download-ci-llvm=true/--set=llvm.download-ci-llvm=false/' "$_rust_makefile"
+        grep -qF -- '--set=llvm.download-ci-llvm=false' "$_rust_makefile" || {
+            echo 'Failed to disable Rust CI LLVM download' >&2
+            exit 1
+        }
+        echo "[DIY] rust: llvm.download-ci-llvm=false (build LLVM from source)"
+    else
+        echo 'WARNING: rust Makefile has no llvm.download-ci-llvm flag' >&2
+    fi
+fi
+
+# luci-ssl-openssl: fall back to px5g-standalone (same /usr/sbin/px5g)
+_ssl_makefile="feeds/luci/collections/luci-ssl-openssl/Makefile"
+if [ -f "$_ssl_makefile" ] && \
+    grep -qF -- '+px5g-openssl' "$_ssl_makefile" && \
+    [ ! -d package/utils/px5g-openssl ]; then
+    sed -i 's/+px5g-openssl/+px5g-standalone/' "$_ssl_makefile"
+    grep -qF -- '+px5g-standalone' "$_ssl_makefile" || {
+        echo 'Failed to switch luci-ssl-openssl to px5g-standalone' >&2
+        exit 1
+    }
+    echo "[DIY] luci-ssl-openssl: dep px5g-openssl -> px5g-standalone"
+fi
+
 patch_makefile_dep \
     feeds/packages/lang/python/python-ubus/Makefile \
     'PKG_BUILD_DEPENDS:=python-setuptools/host' \
